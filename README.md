@@ -89,7 +89,7 @@ Once activated, you will see your environment's name in parentheses at the begin
 
 Run your Streamlit app.
 
-streamlit run app.py
+streamlit run newsletter.py
 If this doesn't work, use the long-form command:
 
 python -m streamlit run app.py
