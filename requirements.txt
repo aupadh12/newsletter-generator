@@ -1,5 +1,5 @@
 streamlit
-reportlab
+reportlab==4.4.3
 python-docx
 Pillow
 lxml
