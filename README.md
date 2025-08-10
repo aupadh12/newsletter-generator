@@ -84,6 +84,7 @@ Any time you want to use your new environment, you first need to go to your proj
 
 # macOS and Linux
 source .venv/bin/activate
+
 Once activated, you will see your environment's name in parentheses at the beginning of your terminal prompt. "(.venv)"
 
 Run your Streamlit app.
