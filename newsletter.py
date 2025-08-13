@@ -1,155 +1,83 @@
+# newsletter_v3.py
 import streamlit as st
 from io import BytesIO
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image, ListFlowable, ListItem, KeepTogether, Table, TableStyle
+from datetime import datetime
+import re
+
+# ---- ReportLab (PDF) ----
+from reportlab.platypus import (
+    SimpleDocTemplate, Paragraph, Spacer, Image, ListFlowable, ListItem, KeepTogether, Table, TableStyle
+)
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import inch
-from reportlab.lib.colors import lightgrey, Color
-from reportlab.pdfgen import canvas
+from reportlab.lib.colors import lightgrey, Color, black, HexColor
 from reportlab.lib.utils import ImageReader
+
+# ---- python-docx (DOCX) ----
 from docx import Document
-from docx.shared import Inches
+from docx.shared import Inches, Pt
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-import re
 
-# --------- Helper functions ---------
+# ---- PIL for image overlay (month/year on top image) ----
+from PIL import Image as PILImage, ImageDraw, ImageFont
 
-# Custom canvas with watermark, header, footer, and banner (with bottom image)
-class WatermarkCanvas(canvas.Canvas):
-    def __init__(self, *args, **kwargs):
-        self.month = kwargs.pop('month', '')
-        self.year = kwargs.pop('year', '')
-        self.bottom_image = kwargs.pop('bottom_image', None)
-        self.total_pages = 0
-        canvas.Canvas.__init__(self, *args, **kwargs)
-        
-    def showPage(self):
-        self.draw_watermark()
-        self.draw_month_year_on_image()
-        self.draw_bottom_image()
-        self.draw_banner()
-        canvas.Canvas.showPage(self)
-        
-    def save(self):
-        self.total_pages = self._pageNumber
-        canvas.Canvas.save(self)
-        
-    def draw_watermark(self):
-        self.saveState()
-        self.setFillColor(lightgrey)
-        self.setFont("Helvetica", 50)
-        self.rotate(45)
-        self.drawCentredText(400, 100, "NEWSLETTER")
-        self.restoreState()
-    
-    def draw_month_year_on_image(self):
-        if self.month and self.year and self._pageNumber == 1:
-            self.saveState()
-            self.setFont("Helvetica-Bold", 14)
-            self.setFillColor(Color(0, 0, 0))  # Black text for visibility
-            month_year_text = f"{self.month} {self.year}"
-            text_width = self.stringWidth(month_year_text, "Helvetica-Bold", 14)
-            # Position on top right of content area
-            x = 0.75*inch + CONTENT_WIDTH - text_width - 20
-            y = A4[1] - 1.2*inch  # Below header, on top image area
-            self.drawString(x, y, month_year_text)
-            self.restoreState()
-    
-    def draw_bottom_image(self):
-        if self.bottom_image is not None:
-            try:
-                self.saveState()
-                self.bottom_image.seek(0)
-                img = ImageReader(self.bottom_image)
-                
-                # Calculate scaling to fit page width
-                max_width = A4[0] - 1.5*inch
-                max_height = 1*inch
-                
-                img_width, img_height = img.getSize()
-                width_ratio = max_width / img_width
-                height_ratio = max_height / img_height
-                scale_ratio = min(width_ratio, height_ratio)
-                
-                final_width = img_width * scale_ratio
-                final_height = img_height * scale_ratio
-                
-                # Center horizontally, place at very bottom
-                x = (A4[0] - final_width) / 2
-                y = 0.1*inch
-                
-                self.drawImage(img, x, y, width=final_width, height=final_height, mask='auto')
-                self.restoreState()
-            except Exception:
-                pass
-    
-    def draw_banner(self):
-        self.saveState()
-        banner_start_y = 1.2*inch
-        banner_height = 1.5*inch
-        
-        # Dark blue banner (adjusted to not overlap image)
-        self.setFillColor(Color(0.1, 0.2, 0.4))  # Dark blue
-        self.rect(0, banner_start_y, A4[0], banner_height, fill=1)
-        
-        # AWS logo and text (positioned in banner area)
-        text_y = banner_start_y + banner_height - 0.6*inch
-        
-        # AWS logo placeholder (white text)
-        self.setFillColor(Color(1, 1, 1))  # White
-        self.setFont("Helvetica-Bold", 16)
-        self.drawString(0.75*inch, text_y, "AWS")
-        
-        # "Stay tuned for more updates" text
-        self.setFont("Helvetica-Bold", 14)
-        self.setFillColor(Color(0.8, 0.2, 0.6))  # Dark pink
-        self.drawString(2*inch, text_y, "St")
-        self.setFillColor(Color(1, 1, 1))  # White
-        st_width = self.stringWidth("St", "Helvetica-Bold", 14)
-        self.drawString(2*inch + st_width, text_y, "ay tuned for more updates")
-        
-        self.restoreState()
+# =========================================================
+# Helpers
+# =========================================================
+def process_content_pdf(content: str) -> str:
+    """
+    Convert [text](url) to <a> for PDF; also auto-link urls/emails.
+    """
+    if not content:
+        return ""
+    # Convert markdown-style links to <a>
+    processed = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<a href="\2" color="blue">\1</a>', content)
 
-def process_content_pdf(content):
-    custom_link_pattern = re.compile(r'\[([^\]]+)\]\(([^)]+)\)')
-    processed_content = re.sub(custom_link_pattern, r'<a href="\2" color="blue">\1</a>', content)
-    url_pattern = re.compile(r'(?<!href=")(https?://\S+|mailto:\S+|\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,})(?!")')
-    
-    def replace_link(match):
-        start_pos = match.start()
-        before_text = processed_content[:start_pos]
-        if '<a ' in before_text and '</a>' not in before_text[before_text.rfind('<a '):]:
-            return match.group(0)
-        link = match.group(0)
-        if '@' in link and not link.startswith("mailto:"):
-            link = f"mailto:{link}"
-        return f'<a href="{link}" color="blue">{match.group(0)}</a>'
-    
-    return re.sub(url_pattern, replace_link, processed_content)
+    # Auto-link plain URLs and emails (avoid double-wrapping by excluding content inside <a> tags)
+    url_pattern = re.compile(
+        r'(?<!href=")(?!.*</a>)(https?://\S+|mailto:\S+|\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})(?!")(?![^<]*</a>)'
+    )
 
-def text_to_bullets(text):
-    if not text:
-        return []
-    lines = [line.strip() for line in text.split('\n') if line.strip()]
-    return lines
+    def repl(m):
+        link = m.group(0)
+        if '@' in link and not link.startswith('mailto:'):
+            link = f'mailto:{link}'
+        return f'<a href="{link}" color="blue">{m.group(0)}</a>'
+
+    return re.sub(url_pattern, repl, processed)
+
 
 def add_hyperlink(paragraph, url, text=None):
+    """
+    Insert a clickable hyperlink into a python-docx paragraph.
+    """
     if not text:
         text = url
     part = paragraph.part
-    r_id = part.relate_to(url, 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink', is_external=True)
+    r_id = part.relate_to(
+        url,
+        'http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink',
+        is_external=True
+    )
     hyperlink = OxmlElement('w:hyperlink')
     hyperlink.set(qn('r:id'), r_id)
     hyperlink.set(qn('w:history'), '1')
+
     new_run = OxmlElement('w:r')
     rPr = OxmlElement('w:rPr')
+
+    # Color blue
     c = OxmlElement('w:color')
     c.set(qn('w:val'), '0000FF')
     rPr.append(c)
+
+    # Underline
     u = OxmlElement('w:u')
     u.set(qn('w:val'), 'single')
     rPr.append(u)
+
     new_run.append(rPr)
     new_run_text = OxmlElement('w:t')
     new_run_text.text = text
@@ -158,30 +86,38 @@ def add_hyperlink(paragraph, url, text=None):
     paragraph._p.append(hyperlink)
     return paragraph
 
-def add_text_with_links(paragraph, text):
-    custom_link_pattern = re.compile(r'\[([^\]]+)\]\(([^)]+)\)')
+
+def add_text_with_links(paragraph, text: str):
+    """
+    python-docx helper to render [text](url) and raw links/emails as clickable.
+    """
+    if not text:
+        return
+    md = re.compile(r'\[([^\]]+)\]\(([^)]+)\)')
     last_end = 0
-    
-    for match in custom_link_pattern.finditer(text):
-        paragraph.add_run(text[last_end:match.start()])
-        display_text = match.group(1)
-        url = match.group(2)
-        add_hyperlink(paragraph, url, display_text)
-        last_end = match.end()
-    
-    remaining_text = text[last_end:]
-    url_pattern = re.compile(r'(https?://\S+|mailto:\S+|\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,})')
+    for m in md.finditer(text):
+        paragraph.add_run(text[last_end:m.start()])
+        add_hyperlink(paragraph, m.group(2), m.group(1))
+        last_end = m.end()
+    tail = text[last_end:]
+
+    url_pattern = re.compile(r'(https?://\S+|mailto:\S+|\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})')
     last_end = 0
-    
-    for match in url_pattern.finditer(remaining_text):
-        paragraph.add_run(remaining_text[last_end:match.start()])
-        link = match.group(0)
-        if '@' in link and not link.startswith("mailto:"):
-            link = f"mailto:{link}"
-        add_hyperlink(paragraph, link, match.group(0))
-        last_end = match.end()
-    
-    paragraph.add_run(remaining_text[last_end:])
+    for m in url_pattern.finditer(tail):
+        paragraph.add_run(tail[last_end:m.start()])
+        link = m.group(0)
+        if '@' in link and not link.startswith('mailto:'):
+            link = f'mailto:{link}'
+        add_hyperlink(paragraph, link, m.group(0))
+        last_end = m.end()
+    paragraph.add_run(tail[last_end:])
+
+
+def text_to_bullets(text: str):
+    if not text:
+        return []
+    return [line.strip() for line in text.splitlines() if line.strip()]
+
 
 COLOR_OPTIONS = {
     "Cream White": Color(0.98, 0.96, 0.92),
@@ -192,303 +128,354 @@ COLOR_OPTIONS = {
     "Light Yellow": Color(0.98, 0.98, 0.85)
 }
 
-# --------- PDF Generation ---------
-def create_pdf(top_image, intro_text, intro_color, sections, contact_info, bottom_image, month="", year=""):
-    buffer = BytesIO()
-    PAGE_WIDTH, PAGE_HEIGHT = A4
-    LEFT_MARGIN = RIGHT_MARGIN = 0.75 * inch
-    TOP_MARGIN = BOTTOM_MARGIN = 0.75 * inch
-    CONTENT_WIDTH = PAGE_WIDTH - LEFT_MARGIN - RIGHT_MARGIN
+# =========================================================
+# Page decorations for PDF
+# =========================================================
+def draw_page_frame(canv, doc, headers, footers, draw_confidential=False, confidentiality_line="", draw_watermark=False):
+    """
+    Draws horizontal lines (top/bottom), header/footer (left/right),
+    optional confidentiality (first page only), optional diagonal watermark.
+    """
+    width, height = A4
 
-    class CustomCanvas(WatermarkCanvas):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, month=month, year=year, bottom_image=bottom_image, **kwargs)
+    # Horizontal lines
+    canv.saveState()
+    canv.setStrokeColor(black)
+    canv.setLineWidth(0.5)
+    canv.line(30, height - 40, width - 30, height - 40)  # top line
+    canv.line(30, 40, width - 30, 40)                    # bottom line
 
-    doc = SimpleDocTemplate(
-        buffer,
-        pagesize=A4,
-        leftMargin=LEFT_MARGIN,
-        rightMargin=RIGHT_MARGIN,
-        topMargin=0.75*inch,
-        bottomMargin=0.75*inch,
-        canvasmaker=CustomCanvas
-    )
+    # Header/Footer text
+    canv.setFont("Helvetica", 9)
+    # Header
+    if headers.get('top_left'):
+        canv.drawString(40, height - 30, headers['top_left'])
+    if headers.get('top_right'):
+        canv.drawRightString(width - 40, height - 30, headers['top_right'])
+    # Footer
+    if footers.get('bottom_left'):
+        canv.drawString(40, 30, footers['bottom_left'])
+    if footers.get('bottom_right'):
+        canv.drawRightString(width - 40, 30, footers['bottom_right'])
 
+    # Confidentiality (first page only, centered near bottom)
+    if draw_confidential and confidentiality_line:
+        canv.setFont("Helvetica-Oblique", 8)
+        canv.drawCentredString(width / 2.0, 50, confidentiality_line)
+
+    # Optional watermark across page
+    if draw_watermark:
+        canv.setFont("Helvetica", 48)
+        canv.setFillGray(0.9, 0.3)  # light watermark
+        canv.saveState()
+        canv.translate(width / 2.0, height / 2.0)
+        canv.rotate(45)
+        canv.drawCentredString(0, 0, "NEWSLETTER")
+        canv.restoreState()
+
+    canv.restoreState()
+
+
+def build_pdf(story, headers, footers, confidentiality_line, add_watermark):
+    """
+    Build the PDF with consistent frames on all pages and confidentiality line on first page only.
+    """
+    buf = BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=50, rightMargin=50, topMargin=70, bottomMargin=70)
+
+    def _first(canv, doc_):
+        draw_page_frame(
+            canv, doc_, headers, footers,
+            draw_confidential=True,
+            confidentiality_line=confidentiality_line,
+            draw_watermark=add_watermark
+        )
+
+    def _later(canv, doc_):
+        draw_page_frame(
+            canv, doc_, headers, footers,
+            draw_confidential=False,
+            confidentiality_line="",
+            draw_watermark=add_watermark
+        )
+
+    doc.build(story, onFirstPage=_first, onLaterPages=_later)
+    buf.seek(0)
+    return buf
+
+# =========================================================
+# Image utilities
+# =========================================================
+def overlay_month_year_on_image(file, month: str, year: str):
+    """
+    Overlays 'Month Year' text on the top-right of the uploaded image.
+    Returns a BytesIO object for ReportLab Image.
+    """
+    try:
+        img = PILImage.open(file).convert("RGBA")
+        draw = ImageDraw.Draw(img)
+
+        text = f"{month} {year}".strip()
+        if not text:
+            bio = BytesIO()
+            img.save(bio, format="PNG")
+            bio.seek(0)
+            return bio
+
+        # Choose a font (default if no TTF available)
+        try:
+            font = ImageFont.truetype("arial.ttf", 28)
+        except:
+            font = ImageFont.load_default()
+
+        text_w, text_h = draw.textbbox((0, 0), text, font=font)[2:]
+        pad = 10
+        x = img.width - text_w - 2 * pad - 10
+        y = 10
+        # semi-opaque white box behind text for readability
+        box = (x, y, x + text_w + 2 * pad, y + text_h + 2 * pad)
+        draw.rectangle(box, fill=(255, 255, 255, 180))
+        draw.text((x + pad, y + pad), text, fill=(0, 0, 0, 255), font=font)
+
+        out = BytesIO()
+        img.save(out, format="PNG")
+        out.seek(0)
+        return out
+    except Exception:
+        # If anything goes wrong, just return original file
+        if hasattr(file, "seek"):
+            file.seek(0)
+        raw = BytesIO(file.read() if hasattr(file, "read") else file)
+        raw.seek(0)
+        return raw
+
+# =========================================================
+# PDF Generation
+# =========================================================
+def create_pdf(top_image_file, intro_text, intro_color, sections, contact_info, bottom_image_file,
+               headers, footers, confidentiality_line, add_watermark):
     styles = getSampleStyleSheet()
-    intro_style = ParagraphStyle(
-        'IntroStyle',
-        parent=styles['Normal'],
-        backColor=intro_color,
-        borderPadding=12
-    )
-
     story = []
     
-    # Month/year above top image on right side
-    if month and year:
-        month_year_para = Paragraph(f"<b>{month} {year}</b>", ParagraphStyle('MonthYear', parent=styles['Normal'], fontSize=14, textColor=Color(0,0,0), alignment=2))
-        story.append(month_year_para)
-        story.append(Spacer(1, 0.1*inch))
-    
-    # Top image
-    if top_image:
-        top_image.seek(0)
-        img = Image(top_image)
-        img.drawWidth = CONTENT_WIDTH
-        calculated_height = img.drawHeight * (CONTENT_WIDTH / img.imageWidth)
-        img.drawHeight = min(calculated_height, 2*inch)
-        image_table = Table([[img]], colWidths=[CONTENT_WIDTH])
-        image_table.setStyle(TableStyle([
-            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-            ('LEFTPADDING', (0, 0), (-1, -1), 0),
-            ('RIGHTPADDING', (0, 0), (-1, -1), 0),
-            ('TOPPADDING', (0, 0), (-1, -1), 0),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 0),
-        ]))
-        story.append(image_table)
-    
-    # Introduction
-    if intro_text:
-        intro_table = Table(
-            [[Paragraph(process_content_pdf(intro_text), intro_style)]],
-            colWidths=[CONTENT_WIDTH]
-        )
-        intro_table.setStyle(TableStyle([
-            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-            ('LEFTPADDING', (0, 0), (-1, -1), 12),
-            ('RIGHTPADDING', (0, 0), (-1, -1), 12),
-            ('TOPPADDING', (0, 0), (-1, -1), 12),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 12),
-        ]))
-        story.append(intro_table)
-        story.append(Spacer(1, 0.3*inch))
-    
-    # Sections
-    for section in sections:
-        title = section.get("title", "")
-        content = section.get("content", "")
-        section_color = section.get("color", COLOR_OPTIONS["Off White"])
-        bullet_points = text_to_bullets(content) if content else []
-        
-        heading_style = ParagraphStyle('HeadingStyle', parent=styles['Heading2'], spaceAfter=6)
-        bullet_style = ParagraphStyle('BulletStyle', parent=styles['Normal'], leftIndent=12, bulletIndent=0, spaceAfter=8, leading=18)
-        
-        if title or bullet_points:
-            table_data = []
-            if title:
-                table_data.append([Paragraph(f"<b>{title}</b>", heading_style)])
-            if bullet_points:
-                bullet_items = [ListItem(Paragraph(process_content_pdf(bp.strip()), bullet_style), bulletText='•') for bp in bullet_points if bp.strip()]
-                bullet_list = ListFlowable(bullet_items, bulletType='bullet', leftIndent=12)
-                table_data.append([bullet_list])
-            
-            section_table = Table(table_data, colWidths=[CONTENT_WIDTH])
-            section_table.setStyle(TableStyle([
-                ('BACKGROUND', (0, 0), (-1, -1), section_color),
-                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-                ('LEFTPADDING', (0, 0), (-1, -1), 12),
-                ('RIGHTPADDING', (0, 0), (-1, -1), 12),
-                ('TOPPADDING', (0, 0), (-1, -1), 12),
-                ('BOTTOMPADDING', (0, 0), (-1, -1), 12),
-            ]))
-            story.append(KeepTogether(section_table))
-            story.append(Spacer(1, 0.3*inch))
-    
-    # Contact Information
-    if contact_info:
-        contact_table = Table(
-            [[Paragraph("<b>Contact Information</b>", styles['Heading2']),
-              Paragraph(process_content_pdf(contact_info), styles['Normal'])]],
-            colWidths=[CONTENT_WIDTH]
-        )
-        contact_table.setStyle(TableStyle([
-            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-            ('LEFTPADDING', (0, 0), (-1, -1), 12),
-            ('RIGHTPADDING', (0, 0), (-1, -1), 12),
-            ('TOPPADDING', (0, 0), (-1, -1), 12),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 12),
-        ]))
-        story.append(contact_table)
-    
-    # Add bottom image at the end
-    if bottom_image:
-        story.append(Spacer(1, 0.5*inch))
-        bottom_image.seek(0)
-        img = Image(bottom_image)
-        img.drawWidth = CONTENT_WIDTH
-        calculated_height = img.drawHeight * (CONTENT_WIDTH / img.imageWidth)
-        img.drawHeight = min(calculated_height, 1*inch)
-        image_table = Table([[img]], colWidths=[CONTENT_WIDTH])
-        image_table.setStyle(TableStyle([
-            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-            ('LEFTPADDING', (0, 0), (-1, -1), 0),
-            ('RIGHTPADDING', (0, 0), (-1, -1), 0),
-            ('TOPPADDING', (0, 0), (-1, -1), 0),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 0),
-        ]))
-        story.append(image_table)
-    
-    doc.build(story)
-    buffer.seek(0)
-    return buffer
+    # Calculate content width (A4 width - left margin - right margin)
+    content_width = A4[0] - 100  # 50 left + 50 right margin = 100
 
-# --------- DOCX Generation ---------
-def create_docx(top_image, intro_text, intro_color, sections, contact_info, bottom_image, month="", year=""):
-    doc = Document()
-    
-    # Header with What's new at Amazon Web Services and month/year
-    header_table = doc.add_table(rows=1, cols=2)
-    header_table.autofit = False
-    header_table.columns[0].width = Inches(4)
-    header_table.columns[1].width = Inches(2)
-    
-    left_cell = header_table.cell(0, 0)
-    left_cell.text = "What's new at Amazon Web Services"
-    left_cell.paragraphs[0].runs[0].bold = True
-    
-    right_cell = header_table.cell(0, 1)
-    if month and year:
-        right_cell.text = f"{month} {year}"
-        right_cell.paragraphs[0].runs[0].bold = True
-        right_cell.paragraphs[0].alignment = 2  # Right alignment
-    
-    doc.add_paragraph()
-    
     # Top image
-    if top_image:
-        top_image.seek(0)
-        doc.add_picture(top_image, width=Inches(6), height=Inches(2))
+    if top_image_file is not None:
+        top_image_file.seek(0)
+        img_io = BytesIO(top_image_file.read())
+        img_io.seek(0)
+        story.append(Image(img_io, width=content_width, height=2 * inch))
+        story.append(Spacer(1, 0.25 * inch))
+
+    # Intro block with colored background
+    if intro_text:
+        intro_style = ParagraphStyle(
+            "Intro",
+            parent=styles["Normal"],
+            backColor=intro_color,
+            leading=14,
+            spaceAfter=12,
+            borderPadding=10
+        )
+        story.append(Paragraph(process_content_pdf(intro_text), intro_style))
+        story.append(Spacer(1, 0.2 * inch))
+
+    # Sections
+    for i, sec in enumerate(sections, start=1):
+        title = (sec.get("title") or "").strip()
+        content = (sec.get("content") or "").strip()
+        section_color = sec.get("color", Color(1, 1, 1))
+
+        bullets = text_to_bullets(content)
+        if title or bullets:
+            section_content = []
+            
+            if title:
+                section_content.append(Paragraph(f"<b>{title}</b>", styles["Heading2"]))
+                section_content.append(Spacer(1, 0.05 * inch))
+            
+            if bullets:
+                bullet_style = ParagraphStyle(f"BulletStyle{i}", parent=styles["Normal"], leading=14, spaceBefore=0, spaceAfter=28, bulletFontSize=8)
+                items = [ListItem(Paragraph(process_content_pdf(b), bullet_style), leftIndent=12) for b in bullets]
+                section_content.append(ListFlowable(items, bulletType='bullet', start='circle', leftIndent=18, bulletFontSize=8))
+            
+            # Create single paragraph with section background
+            if title and bullets:
+                combined_text = f"<b>{title}</b><br/><br/>" + "<br/><br/>".join([f"• {process_content_pdf(b)}" for b in bullets])
+            elif title:
+                combined_text = f"<b>{title}</b>"
+            else:
+                combined_text = "<br/><br/>".join([f"• {process_content_pdf(b)}" for b in bullets])
+            
+            section_style = ParagraphStyle(f"Section{i}", parent=styles["Normal"], leading=14, spaceAfter=12, backColor=section_color, borderPadding=10)
+            story.append(Paragraph(combined_text, section_style))
+            story.append(Spacer(1, 0.15 * inch))
+
+    # Contact info
+    if contact_info:
+        story.append(Paragraph("<b>Contact Information</b>", styles["Heading2"]))
+        story.append(Spacer(1, 0.05 * inch))
+        contact_style = ParagraphStyle("ContactStyle", parent=styles["Normal"], leading=14, spaceAfter=12)
+        story.append(Paragraph(process_content_pdf(contact_info), contact_style))
+
+    # Bottom image
+    if bottom_image_file is not None:
+        bottom_image_file.seek(0)
+        bio = BytesIO(bottom_image_file.read())
+        bio.seek(0)
+        story.append(Spacer(1, 0.3 * inch))
+        story.append(Image(bio, width=content_width, height=1 * inch))
+
+    return build_pdf(
+        story=story,
+        headers=headers,
+        footers=footers,
+        confidentiality_line=confidentiality_line,
+        add_watermark=add_watermark
+    )
+
+# =========================================================
+# DOCX Generation
+# =========================================================
+def create_docx(top_image_file, intro_text, sections, contact_info, bottom_image_file,
+                headers, footers):
+    doc = Document()
+    section = doc.sections[0]
     
-    # Introduction
+    # Calculate content width (A4 width - margins)
+    content_width_inches = (A4[0] - 100) / 72  # Convert points to inches
+
+    # Header (2 cells: left/right)
+    header = section.header
+    h_para = header.add_paragraph()
+    h_para.add_run(headers.get('top_left', '') or '').bold = True
+    h_para.add_run('\t' + (headers.get('top_right', '') or '')).bold = True
+
+    # Footer (2 cells: left/right)
+    footer = section.footer
+    f_para = footer.add_paragraph()
+    f_para.add_run(footers.get('bottom_left', '') or '')
+    f_para.add_run('\t' + (footers.get('bottom_right', '') or ''))
+
+    # Top image
+    if top_image_file is not None:
+        p = doc.add_paragraph()
+        run = p.add_run()
+        top_image_file.seek(0)
+        run.add_picture(top_image_file, width=Inches(content_width_inches), height=Inches(2))
+
+    # Intro text
     if intro_text:
         p = doc.add_paragraph()
         add_text_with_links(p, intro_text)
-        doc.add_paragraph()
-    
+
     # Sections
-    for section in sections:
-        title = section.get("title", "")
-        content = section.get("content", "")
-        bullet_points = text_to_bullets(content) if content else []
-        
+    for sec in sections:
+        title = (sec.get("title") or "").strip()
+        content = (sec.get("content") or "").strip()
         if title:
             doc.add_heading(title, level=2)
-        if bullet_points:
-            for bp in bullet_points:
-                p = doc.add_paragraph(style='List Bullet')
-                add_text_with_links(p, bp)
-        doc.add_paragraph()
-    
-    # Contact Information
+        for bullet in text_to_bullets(content):
+            p = doc.add_paragraph(style='List Bullet')
+            add_text_with_links(p, bullet)
+
+    # Contact info
     if contact_info:
         doc.add_heading("Contact Information", level=2)
         p = doc.add_paragraph()
         add_text_with_links(p, contact_info)
-    
-    # Banner text (before footer image)
-    doc.add_paragraph()
-    banner_p = doc.add_paragraph()
-    banner_p.add_run("AWS ").bold = True
-    banner_p.add_run("Stay tuned for more updates").bold = True
-    banner_p.alignment = 1  # Center alignment
-    
-    # Bottom image in DOCX footer (at very bottom)
-    if bottom_image:
-        bottom_image.seek(0)
-        section = doc.sections[-1]
-        footer = section.footer
-        
-        # Add image to footer
-        para = footer.add_paragraph()
-        para.alignment = 1  # Center alignment
-        run = para.add_run()
-        run.add_picture(bottom_image, width=Inches(6))
-    
-    buffer = BytesIO()
-    doc.save(buffer)
-    buffer.seek(0)
-    return buffer
 
-# --------- Streamlit UI ---------
-st.title("📬 Newsletter Generator (Aligned PDF & DOCX with Clickable Links)")
-st.write("Fill in the details to create a perfectly aligned newsletter with clickable links, bullet points, intro, contact info, and images.")
+    # Bottom image
+    if bottom_image_file is not None:
+        p = doc.add_paragraph()
+        run = p.add_run()
+        bottom_image_file.seek(0)
+        run.add_picture(bottom_image_file, width=Inches(content_width_inches), height=Inches(1))
 
-# Newsletter header information
+    buf = BytesIO()
+    doc.save(buf)
+    buf.seek(0)
+    return buf
+
+# =========================================================
+# Streamlit UI
+# =========================================================
+st.set_page_config(page_title="Newsletter Generator", page_icon="📬", layout="centered")
+
+st.title("📬 Newsletter Generator")
+st.caption("Multi-section newsletter with images, links, headers/footers, and a first-page confidentiality note.")
+
+with st.expander("Images"):
+    top_image = st.file_uploader("Top image (optional)", type=["png", "jpg", "jpeg", "webp"])
+    bottom_image = st.file_uploader("Bottom image (optional)", type=["png", "jpg", "jpeg", "webp"])
+
+
+
+st.subheader("Intro")
+intro_text = st.text_area("Intro text (links supported: [label](https://example.com))", height=120)
+intro_color_name = st.selectbox("Intro background color", list(COLOR_OPTIONS.keys()), index=0)
+intro_color = COLOR_OPTIONS[intro_color_name]
+
+st.subheader("Sections")
+num_sections = st.number_input("How many sections?", min_value=1, max_value=10, value=3, step=1)
+sections = []
+for i in range(int(num_sections)):
+    st.markdown(f"**Section {i+1}**")
+    title = st.text_input(f"Title {i+1}", key=f"title_{i}")
+    content = st.text_area(
+        f"Bullets {i+1} (one per line; links supported)", key=f"content_{i}", height=120
+    )
+    color_name = st.selectbox(f"Section {i+1} background color", list(COLOR_OPTIONS.keys()), index=0, key=f"color_{i}")
+    sections.append({"title": title, "content": content, "color": COLOR_OPTIONS[color_name]})
+
+st.subheader("Contact")
+contact_info = st.text_area("Contact info (links supported)", height=100)
+
+st.subheader("Headers & Footers (all pages)")
 col1, col2 = st.columns(2)
 with col1:
-    month = st.text_input("Month", placeholder="e.g., January")
+    header_top_left = st.text_input("Header — Top Left", placeholder="Company Name")
+    footer_bottom_left = st.text_input("Footer — Bottom Left", placeholder="Address or tagline")
 with col2:
-    year = st.text_input("Year", placeholder="e.g., 2024")
+    header_top_right = st.text_input("Header — Top Right", placeholder="www.example.com")
+    footer_bottom_right = st.text_input("Footer — Bottom Right", placeholder="Page/Legal/etc.")
 
-# Image uploads
-top_image = st.file_uploader("Upload Top Image", type=["png", "jpg", "jpeg"])
-bottom_image = st.file_uploader("Upload Bottom Image", type=["png", "jpg", "jpeg"])
+st.subheader("Confidentiality (first PDF page only)")
+confidentiality_line = st.text_input("Confidentiality line (centered at bottom of 1st page)")
 
-# Introduction section
-col1, col2 = st.columns([3, 1])
-with col1:
-    intro_text = st.text_area("Newsletter Introduction", height=120)
-with col2:
-    intro_color_name = st.selectbox("Background Color", list(COLOR_OPTIONS.keys()), key="intro_color")
-    intro_color = COLOR_OPTIONS[intro_color_name]
+add_watermark = st.checkbox("Add diagonal 'NEWSLETTER' watermark", value=False)
 
-# Initialize sections
-if 'sections' not in st.session_state:
-    st.session_state.sections = [{"title": "", "content": "", "color": COLOR_OPTIONS["Off White"]}]
+st.markdown("---")
+if st.button("Generate PDF and DOCX"):
+    headers = {"top_left": header_top_left, "top_right": header_top_right}
+    footers = {"bottom_left": footer_bottom_left, "bottom_right": footer_bottom_right}
 
-# Number of sections
-num_sections = st.number_input("Number of Sections", min_value=1, max_value=10, value=len(st.session_state.sections))
+    # Create PDF + DOCX
+    pdf_buffer = create_pdf(
+        top_image, intro_text, intro_color, sections, contact_info, bottom_image,
+        headers, footers, confidentiality_line, add_watermark
+    )
+    docx_buffer = create_docx(
+        top_image, intro_text, sections, contact_info, bottom_image,
+        headers, footers
+    )
 
-# Adjust sections list
-if len(st.session_state.sections) != num_sections:
-    if num_sections > len(st.session_state.sections):
-        st.session_state.sections.extend([{"title": "", "content": "", "color": COLOR_OPTIONS["Off White"]}] * (num_sections - len(st.session_state.sections)))
-    else:
-        st.session_state.sections = st.session_state.sections[:num_sections]
-
-# Section inputs
-for i in range(num_sections):
-    col1, col2, col3 = st.columns([3, 1, 1])
-    with col1:
-        st.subheader(f"Section {i+1}")
-    with col2:
-        if st.button("↑", key=f"up_{i}", disabled=i==0):
-            st.session_state.sections[i], st.session_state.sections[i-1] = st.session_state.sections[i-1], st.session_state.sections[i]
-            st.rerun()
-    with col3:
-        if st.button("↓", key=f"down_{i}", disabled=i==num_sections-1):
-            st.session_state.sections[i], st.session_state.sections[i+1] = st.session_state.sections[i+1], st.session_state.sections[i]
-            st.rerun()
-    
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        st.session_state.sections[i]["title"] = st.text_input(f"Title for Section {i+1}", value=st.session_state.sections[i]["title"], key=f"title_{i}")
-        st.session_state.sections[i]["content"] = st.text_area(f"Content for Section {i+1} (each line = bullet point)", value=st.session_state.sections[i]["content"], key=f"content_{i}", height=120)
-    with col2:
-        section_color_name = st.selectbox("Background Color", list(COLOR_OPTIONS.keys()), 
-                                    index=list(COLOR_OPTIONS.values()).index(st.session_state.sections[i]["color"]), 
-                                    key=f"section_color_{i}")
-        st.session_state.sections[i]["color"] = COLOR_OPTIONS[section_color_name]
-
-sections = st.session_state.sections
-
-# Contact information
-contact_info = st.text_area("Contact Information (supports links & emails)", height=100)
-
-# Generate button
-if st.button("Generate Newsletter"):
-    with st.spinner("Generating newsletter..."):
-        try:
-            pdf_buffer = create_pdf(top_image, intro_text, intro_color, sections, contact_info, bottom_image, month, year)
-            docx_buffer = create_docx(top_image, intro_text, intro_color, sections, contact_info, bottom_image, month, year)
-            
-            st.success("Newsletter generated successfully!")
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                st.download_button("📥 Download Newsletter PDF", data=pdf_buffer, file_name="newsletter.pdf", mime="application/pdf")
-            with col2:
-                st.download_button("📥 Download Newsletter DOCX", data=docx_buffer, file_name="newsletter.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-        
-        except Exception as e:
-            st.error(f"Error generating newsletter: {str(e)}")
+    st.success("✅ Newsletter generated successfully!")
+    dl1, dl2 = st.columns(2)
+    with dl1:
+        st.download_button(
+            "📄 Download PDF",
+            data=pdf_buffer,
+            file_name="newsletter.pdf",
+            mime="application/pdf",
+            use_container_width=True
+        )
+    with dl2:
+        st.download_button(
+            "📝 Download DOCX",
+            data=docx_buffer,
+            file_name="newsletter.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            use_container_width=True
+        )
