@@ -310,7 +310,9 @@ def create_pdf(top_image_file, intro_text, intro_color, sections, contact_info, 
             
             section_style = ParagraphStyle(f"Section{i}", parent=styles["Normal"], leading=14, spaceAfter=12, backColor=section_color, borderPadding=10)
             story.append(Paragraph(combined_text, section_style))
-            story.append(Spacer(1, 0.15 * inch))
+            # Use 2-line spacing for last 4 sections
+            spacing = 0.3 * inch if i > len(sections) - 4 else 0.15 * inch
+            story.append(Spacer(1, spacing))
 
     # Contact info
     if contact_info:
