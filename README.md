@@ -98,3 +98,4 @@ To stop the Streamlit server, press Ctrl+C in the terminal.
 When you're done using this environment, return to your normal shell by typing:
 
 deactivate
+ this is legacy
